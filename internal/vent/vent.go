@@ -55,14 +55,33 @@ func (f *Fan) Start(ctx context.Context) error {
 	f.state = StateStarting
 	f.reason = ""
 	f.mu.Unlock()
-	_ = f.actor.Start(f.id)
-	f.mu.Lock()
-	f.state = StateRunning
-	f.starts++
-	f.mu.Unlock()
-	f.mon.RecordStart()
-	f.bus.Publish("vent.fan_running", f.id)
-	return nil
+	// 启动命令本身就被执行器拒绝时，不能置为 running：现场根本没收到启动指令。
+	if err := f.actor.Start(f.id); err != nil {
+		f.mu.Lock()
+		f.state = StateFailed
+		f.reason = err.Error()
+		f.mu.Unlock()
+		f.bus.Publish("vent.fan_start_rejected", f.id)
+		return err
+	}
+	// 必须等到现场运行反馈（Confirm）才可置 running，否则状态与现场对不上。
+	select {
+	case <-f.actor.Confirm(f.id):
+		f.mu.Lock()
+		f.state = StateRunning
+		f.starts++
+		f.mu.Unlock()
+		f.mon.RecordStart()
+		f.bus.Publish("vent.fan_running", f.id)
+		return nil
+	case <-ctx.Done():
+		f.mu.Lock()
+		f.state = StateFailed
+		f.reason = ctx.Err().Error()
+		f.mu.Unlock()
+		f.bus.Publish("vent.fan_start_failed", f.id)
+		return ctx.Err()
+	}
 }
 
 func (f *Fan) Stop(ctx context.Context) error {

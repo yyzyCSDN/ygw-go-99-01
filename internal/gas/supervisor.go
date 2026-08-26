@@ -130,7 +130,14 @@ func (s *Supervisor) StartFan(id string, timeout time.Duration) error {
 	if !s.cfg.Interlock.Active(id, s.cfg.Thresholds.Alert) {
 		return ErrNotOverLimit
 	}
-	_ = fan.Start(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	err := fan.Start(ctx)
+	if err != nil {
+		// 启动未确认成功：不得上报"已启动"，并保留 failed 状态以便重新下发。
+		s.cfg.Bus.Publish("gas.fan_start_failed", id)
+		return err
+	}
 	s.cfg.Bus.Publish("gas.fan_started", id)
 	return nil
 }
