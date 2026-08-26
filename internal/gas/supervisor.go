@@ -262,8 +262,46 @@ func (s *Supervisor) ManualRestore(id string) error {
 	}
 	_ = s.cfg.Trips.Clear(id)
 	_ = s.cfg.Alarms.Clear(id)
+	//现场手动复电期间，自动闭锁应让位：登记手动保持并禁用自动策略，
+	//避免刚复电的巷道被自动断电逻辑再次断开导致人员被困。
+	s.applyManualHold(id)
 	s.cfg.Bus.Publish("gas.manual_restored", id)
 	return nil
+}
+
+// applyManualHold 登记一条带 TTL 的手动保持，并关闭对应测点风机的自动控制。
+// 保持到期后由 manualHoldActive 自动释放，恢复自动闭锁策略。
+func (s *Supervisor) applyManualHold(id string) {
+	s.mu.Lock()
+	s.hold[id] = time.Now()
+	s.mu.Unlock()
+	if fan, ok := s.fans[id]; ok {
+		fan.DisableAuto()
+	}
+	s.cfg.Bus.Publish("gas.manual_hold_applied", id)
+}
+
+// manualHoldActive 返回测点是否处于未过期的手动保持期。
+// 仅当存在保持登记且已到期时，才清理登记、恢复风机自动控制并发布到期事件；
+// 从未登记过保持的测点不产生任何副作用，避免每次轮询都误发到期事件。
+func (s *Supervisor) manualHoldActive(id string) bool {
+	s.mu.Lock()
+	started, ok := s.hold[id]
+	if !ok {
+		s.mu.Unlock()
+		return false
+	}
+	if s.cfg.HoldTTL > 0 && time.Since(started) >= s.cfg.HoldTTL {
+		delete(s.hold, id)
+		s.mu.Unlock()
+		if fan, ok := s.fans[id]; ok {
+			fan.EnableAuto()
+		}
+		s.cfg.Bus.Publish("gas.manual_hold_expired", id)
+		return false
+	}
+	s.mu.Unlock()
+	return true
 }
 
 func (s *Supervisor) ReleaseManualHold(id string) {
@@ -284,6 +322,11 @@ func (s *Supervisor) Evaluate(id string) error {
 	level := s.cfg.Thresholds.Level(state.Value)
 	if level != StateTripped {
 		return nil
+	}
+	//现场手动复电生效期间，自动闭锁让位：处于手动保持期或风机已切到手动，
+	//都不再下发断电，避免复电后被自动逻辑再次断开。
+	if s.manualHoldActive(id) {
+		return ErrManualHold
 	}
 	if fan, ok := s.fans[id]; ok && !fan.AutoEnabled() {
 		return ErrManualHold

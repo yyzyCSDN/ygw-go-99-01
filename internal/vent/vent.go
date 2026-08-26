@@ -139,7 +139,9 @@ func (f *Fan) EnableAuto() {
 }
 
 func (f *Fan) AutoEnabled() bool {
-	return true
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.auto
 }
 
 func (f *Fan) RecoverState(live bool, auto bool) error {
