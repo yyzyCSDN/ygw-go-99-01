@@ -180,7 +180,7 @@ func (s *Supervisor) TriggerTrip(id string, timeout time.Duration) error {
 	s.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	wait, err := s.cfg.Trips.Trigger(context.Background(), id)
+	wait, err := s.cfg.Trips.Trigger(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -195,7 +195,12 @@ func (s *Supervisor) TriggerTrip(id string, timeout time.Duration) error {
 	}
 	select {
 	case <-wait.Done():
+		// await already settled the lock (confirmed or cancelled).
 	case <-ctx.Done():
+		// Timed out: wait for await to finish settling the lock back to
+		// armed before returning, otherwise an immediate reset/re-trigger
+		// could race the still-running await and see StateExecuting.
+		<-wait.Done()
 	}
 	if err := ctx.Err(); err != nil {
 		return err
