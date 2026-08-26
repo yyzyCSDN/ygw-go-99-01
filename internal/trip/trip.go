@@ -2,12 +2,19 @@ package trip
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
 	"coalminegas/internal/event"
 )
+
+// ErrAlreadyTripped is returned when a trip is requested for a point that is
+// already locked (StateTripped). The same over-limit condition must only close
+// the feeder once; signal bounce after the lock is set must not re-issue the
+// breaker command. The lock stays put until an explicit Reset/Clear re-arms it.
+var ErrAlreadyTripped = errors.New("trip already locked for point")
 
 const (
 	StateArmed     = "armed"
@@ -52,6 +59,15 @@ func (m *Manager) Trigger(ctx context.Context, id string) (*Wait, error) {
 	if !ok {
 		lock = &LockState{ID: id, State: StateArmed}
 		m.locks[id] = lock
+	}
+	// A point that is already locked must not be re-triggered. The same
+	// over-limit condition closes the feeder exactly once; a bouncing or
+	// still-over-limit signal after the lock is set must not re-issue the
+	// breaker command. Only an explicit Reset (re-arm) or Clear (restore)
+	// moves the lock out of the tripped state and allows a fresh trigger.
+	if lock.State == StateTripped {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("%w: %s", ErrAlreadyTripped, id)
 	}
 	if lock.State == StateExecuting {
 		m.mu.Unlock()

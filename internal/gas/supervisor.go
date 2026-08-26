@@ -20,6 +20,15 @@ var (
 	ErrManualHold   = errors.New("manual hold active")
 )
 
+// isAlreadyTripped reports whether err is the "point already locked" result
+// returned by the trip manager when a re-trigger is attempted on a point that
+// has already been locked. For the auto-evaluation loop this is the expected,
+// non-error outcome for a bouncing or still-over-limit signal: the feeder has
+// already been opened once, so no further action is required.
+func isAlreadyTripped(err error) bool {
+	return errors.Is(err, trip.ErrAlreadyTripped)
+}
+
 type Config struct {
 	Thresholds     Thresholds
 	Bus            *event.Bus
@@ -168,6 +177,12 @@ func (s *Supervisor) TriggerTrip(id string, timeout time.Duration) error {
 	defer cancel()
 	wait, err := s.cfg.Trips.Trigger(ctx, id)
 	if err != nil {
+		// The point is already locked from a prior over-limit event. The same
+		// condition closes the feeder exactly once, so a bouncing or
+		// still-over-limit signal must be a no-op rather than a fresh trip.
+		if isAlreadyTripped(err) {
+			return nil
+		}
 		return err
 	}
 	fan, hasFan := s.fans[id]
